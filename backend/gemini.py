@@ -12,8 +12,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize the Gemini API client from environment variables
-api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
-client = genai.Client(api_key=api_key) if api_key else None
+def get_gemini_client():
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    if not api_key:
+        return None
+    return genai.Client(api_key=api_key)
+
+client = get_gemini_client()
 
 def analyze_websites_with_gemini(websites, category="e-commerce"):
     """
@@ -29,6 +34,12 @@ def analyze_websites_with_gemini(websites, category="e-commerce"):
     """
     results = {}
     
+    global client
+    if client is None:
+        client = get_gemini_client()
+    if client is None:
+        return {"error": "Gemini API key is not configured in .env"}
+
     print("Starting website analysis...")
     
     # Collect full screenshots for all websites
@@ -38,7 +49,10 @@ def analyze_websites_with_gemini(websites, category="e-commerce"):
     
     for website in websites:
         name = website["name"]
-        full_image_path = website["full_path"]
+        full_image_path = website.get("full_path")
+        if not full_image_path or not os.path.exists(full_image_path):
+            print(f"[WARN] full_path missing or not on disk for {name}: {full_image_path}")
+            continue
         url = website.get("url", f"https://{name.lower()}.com")
         
         print(f"Processing {name}...")
@@ -177,10 +191,24 @@ def analyze_websites_with_gemini(websites, category="e-commerce"):
     start_time = time.time()
     
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=contents
-        )
+        candidate_models = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]
+        response = None
+        last_err = None
+        for cand_model in candidate_models:
+            try:
+                print(f"Trying Gemini model: {cand_model}...")
+                response = client.models.generate_content(
+                    model=cand_model,
+                    contents=contents
+                )
+                print(f"Successfully generated analysis with {cand_model}")
+                break
+            except Exception as m_err:
+                print(f"Model {cand_model} failed: {m_err}")
+                last_err = m_err
+
+        if response is None:
+            raise Exception(f"All candidate models failed. Last error: {last_err}")
         
         elapsed_time = time.time() - start_time
         print(f"Gemini API response received in {elapsed_time:.2f} seconds")

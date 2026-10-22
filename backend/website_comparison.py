@@ -64,6 +64,11 @@ def preprocess_image(image_path):
 
 def capture_sections_and_fullpage(page, url, website_name):
     try:
+        # Sanitize URL
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
+
+        print(f"[INFO] Navigating to {url} for {website_name}...")
         page.goto(url, wait_until="load", timeout=60000)
         page.wait_for_timeout(3000)
 
@@ -85,24 +90,6 @@ def capture_sections_and_fullpage(page, url, website_name):
             ]
         }
 
-        header = next((el for sel in selectors["header"] if (el := page.query_selector(sel))), None)
-        footer = next((el for sel in selectors["footer"] if (el := page.query_selector(sel))), None)
-
-        if not header or not footer:
-            print(f"❌ Couldn't find header or footer for {website_name}. Skipping...")
-            return None
-
-        header_box = header.bounding_box()
-        footer_box = footer.bounding_box()
-
-        if not header_box or not footer_box:
-            print(f"❌ Couldn't retrieve bounding boxes for {website_name}. Skipping...")
-            return None
-
-        header_bottom = header_box['y'] + header_box['height']
-        footer_top = footer_box['y']
-        main_height = max(0, footer_top - header_bottom)
-
         # Create directory for screenshots
         screenshots_folder = f"screenshots/{website_name}"
         os.makedirs(screenshots_folder, exist_ok=True)
@@ -113,33 +100,71 @@ def capture_sections_and_fullpage(page, url, website_name):
         footer_path = f"{screenshots_folder}/{website_name}_footer.png"
         full_page_path = f"{screenshots_folder}/{website_name}_full.png"
 
-        # Take screenshots and save them locally
+        # 1. Take full page screenshot FIRST (essential for Gemini)
         full_img_bytes = page.screenshot(full_page=True)
         with open(full_page_path, "wb") as f:
             f.write(full_img_bytes)
 
-        header_img_bytes = header.screenshot()
-        with open(header_path, "wb") as f:
-            f.write(header_img_bytes)
+        # 2. Header detection with fallback
+        header = next((el for sel in selectors["header"] if (el := page.query_selector(sel))), None)
+        header_box = header.bounding_box() if header else None
+        header_bottom = 200
 
-        if main_height > 50:
-            main_img_bytes = page.screenshot(clip={
-                'x': 0,
-                'y': header_bottom,
-                'width': 1280,
-                'height': main_height
-            })
-            with open(main_path, "wb") as f:
-                f.write(main_img_bytes)
+        if header and header_box and header_box.get('height', 0) > 20:
+            try:
+                header_img_bytes = header.screenshot()
+                with open(header_path, "wb") as f:
+                    f.write(header_img_bytes)
+                header_bottom = header_box['y'] + header_box['height']
+            except Exception:
+                header_img_bytes = page.screenshot(clip={'x': 0, 'y': 0, 'width': 1280, 'height': 200})
+                with open(header_path, "wb") as f:
+                    f.write(header_img_bytes)
         else:
-            print(f"⚠️ Main section too small for {website_name}. Skipping main.")
-            main_path = None
+            print(f"[INFO] Using viewport top as header fallback for {website_name}")
+            header_img_bytes = page.screenshot(clip={'x': 0, 'y': 0, 'width': 1280, 'height': 200})
+            with open(header_path, "wb") as f:
+                f.write(header_img_bytes)
 
-        footer_img_bytes = footer.screenshot()
-        with open(footer_path, "wb") as f:
-            f.write(footer_img_bytes)
+        # 3. Footer detection with fallback
+        footer = next((el for sel in selectors["footer"] if (el := page.query_selector(sel))), None)
+        footer_box = footer.bounding_box() if footer else None
+        viewport_size = page.viewport_size or {"width": 1280, "height": 800}
+        footer_top = max(header_bottom + 100, viewport_size['height'] - 250)
 
-        # Store local paths
+        if footer and footer_box and footer_box.get('height', 0) > 20:
+            try:
+                footer_img_bytes = footer.screenshot()
+                with open(footer_path, "wb") as f:
+                    f.write(footer_img_bytes)
+                footer_top = footer_box['y']
+            except Exception:
+                footer_img_bytes = page.screenshot(clip={'x': 0, 'y': max(0, viewport_size['height'] - 250), 'width': 1280, 'height': 250})
+                with open(footer_path, "wb") as f:
+                    f.write(footer_img_bytes)
+        else:
+            print(f"[INFO] Using bottom viewport as footer fallback for {website_name}")
+            footer_img_bytes = page.screenshot(clip={'x': 0, 'y': max(0, viewport_size['height'] - 250), 'width': 1280, 'height': 250})
+            with open(footer_path, "wb") as f:
+                f.write(footer_img_bytes)
+
+        # 4. Main content section
+        main_height = max(0, footer_top - header_bottom)
+        if main_height > 50:
+            try:
+                main_img_bytes = page.screenshot(clip={
+                    'x': 0,
+                    'y': header_bottom,
+                    'width': 1280,
+                    'height': min(main_height, 1600)
+                })
+                with open(main_path, "wb") as f:
+                    f.write(main_img_bytes)
+            except Exception:
+                main_path = full_page_path
+        else:
+            main_path = full_page_path
+
         local_paths = {
             "header": header_path,
             "main": main_path,
@@ -152,22 +177,19 @@ def capture_sections_and_fullpage(page, url, website_name):
         cloudinary_urls = {}
 
         if os.environ.get('CLOUDINARY_CLOUD_NAME'):
-            # Upload each section to Cloudinary
             for section, path in local_paths.items():
                 if path and os.path.exists(path):
                     public_id = f"{website_name}_{section}"
                     result = upload_image(path, public_id=public_id, folder=cloudinary_folder)
-                    
                     if "error" not in result:
                         cloudinary_urls[f"{section}_cloudinary_url"] = result["url"]
                     else:
-                        print(f"⚠️ Failed to upload {section} screenshot to Cloudinary: {result['error']}")
-        
-        # Combine local paths and Cloudinary URLs
+                        print(f"[WARN] Failed to upload {section} to Cloudinary: {result.get('error')}")
+
         return {**local_paths, **cloudinary_urls}
 
     except Exception as e:
-        print(f"❌ Error processing {website_name}: {e}")
+        print(f"[ERROR] Error processing {website_name}: {e}")
         return None
 
 # --- Compare websites (combined method) ---
@@ -202,7 +224,10 @@ def compare_websites(websites, category):
     
     # First, capture screenshots and collect website data
     with sync_playwright() as p:
-        browser = p.firefox.launch(headless=True)
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception:
+            browser = p.firefox.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 3000})
 
         for site in websites:
@@ -218,7 +243,7 @@ def compare_websites(websites, category):
                         "sections": sections
                     })
             except Exception as e:
-                print(f"❌ Failed to process {name}: {str(e)}")
+                print(f"[ERROR] Failed to process {name}: {str(e)}")
             finally:
                 page.close()
 
@@ -243,12 +268,12 @@ def compare_websites(websites, category):
             "url": site["url"]
         }
         
-        # Check if we have a Cloudinary URL
+        # Include both local path and Cloudinary URL
+        if full_path:
+            gemini_site["full_path"] = full_path
         full_cloudinary_url = sections.get("full_cloudinary_url")
         if full_cloudinary_url:
             gemini_site["full_cloudinary_url"] = full_cloudinary_url
-        elif full_path:
-            gemini_site["full_path"] = full_path
             
         gemini_input.append(gemini_site)
     

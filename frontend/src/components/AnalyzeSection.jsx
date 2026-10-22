@@ -65,7 +65,14 @@ const AnalyzeSection = () => {
       });
 
       if (!response.ok) {
-        throw new Error(`Server responded with status: ${response.status}`);
+        let errorMsg = `Server responded with status: ${response.status}`;
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errorMsg = errData.error;
+          }
+        } catch (_) {}
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
