@@ -207,6 +207,44 @@ def compare_websites_combined(websites, category):
     # Get scores from the main compare_websites function
     return compare_websites(websites, category)
 
+def get_browser_instance(p):
+    """
+    Launch Chromium with Linux/Docker/Render-safe flags.
+    If the Chromium browser binary is missing on Render, auto-installs it on the fly.
+    """
+    chromium_args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu'
+    ]
+
+    try:
+        return p.chromium.launch(headless=True, args=chromium_args)
+    except Exception as e:
+        err_msg = str(e)
+        print(f"[WARN] Failed to launch Chromium: {err_msg}")
+        if "Executable doesn't exist" in err_msg or "playwright install" in err_msg:
+            print("[INFO] Playwright Chromium executable missing. Downloading now...")
+            import subprocess
+            try:
+                subprocess.run(["playwright", "install", "chromium"], check=True)
+                return p.chromium.launch(headless=True, args=chromium_args)
+            except Exception as inst_err:
+                print(f"[ERROR] Auto-install failed: {inst_err}")
+
+        # Try Firefox only as secondary fallback if installed
+        try:
+            return p.firefox.launch(headless=True)
+        except Exception:
+            pass
+
+        raise Exception(f"Playwright browser launch failed: {err_msg}")
+
 # --- Compare websites (main method) ---
 def compare_websites(websites, category):
     """
@@ -224,10 +262,7 @@ def compare_websites(websites, category):
     
     # First, capture screenshots and collect website data
     with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(headless=True)
-        except Exception:
-            browser = p.firefox.launch(headless=True)
+        browser = get_browser_instance(p)
         context = browser.new_context(viewport={"width": 1280, "height": 3000})
 
         for site in websites:
